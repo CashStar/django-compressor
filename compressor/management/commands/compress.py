@@ -4,6 +4,12 @@ import sys
 from types import MethodType
 from fnmatch import fnmatch
 from optparse import make_option
+import time
+
+try:
+    import json
+except:
+    import simplejson as json
 
 try:
     from cStringIO import StringIO
@@ -175,38 +181,49 @@ class Command(NoArgsCommand):
             raise OfflineGenerationError("No template loaders defined. You "
                                          "must set TEMPLATE_LOADERS in your "
                                          "settings.")
-        paths = set()
-        for loader in self.get_loaders():
-            try:
-                module = import_module(loader.__module__)
-                get_template_sources = getattr(module,
-                    'get_template_sources', None)
-                if get_template_sources is None:
-                    get_template_sources = loader.get_template_sources
-                paths.update(list(get_template_sources('')))
-            except (ImportError, AttributeError):
-                # Yeah, this didn't work out so well, let's move on
-                pass
-        if not paths:
-            raise OfflineGenerationError("No template paths found. None of "
-                                         "the configured template loaders "
-                                         "provided template paths. See "
-                                         "http://django.me/template-loaders "
-                                         "for more information on template "
-                                         "loaders.")
-        if verbosity > 1:
-            log.write("Considering paths:\n\t" + "\n\t".join(paths) + "\n")
-        templates = set()
-        for path in paths:
-            for root, dirs, files in os.walk(path,
-                    followlinks=options.get('followlinks', False)):
-                templates.update(os.path.join(root, name)
-                    for name in files if not name.startswith('.') and
-                        any(fnmatch(name, "*%s" % glob) for glob in extensions))
-        if not templates:
-            raise OfflineGenerationError("No templates found. Make sure your "
-                                         "TEMPLATE_LOADERS and TEMPLATE_DIRS "
-                                         "settings are correct.")
+        try:
+            with open(settings.TEMPLATE_MANIFEST, 'r') as fp:
+                manifest = json.loads(fp.read())
+        except:
+            manifest = {}
+        build_manifest = True
+        if manifest.get('last_check', 0) >= time.time() - 3600:
+            templates = set(manifest.get('templates'))
+            build_manifest = False
+        else:
+            manifest['templates'] = set()
+            paths = set()
+            for loader in self.get_loaders():
+                try:
+                    module = import_module(loader.__module__)
+                    get_template_sources = getattr(module,
+                        'get_template_sources', None)
+                    if get_template_sources is None:
+                        get_template_sources = loader.get_template_sources
+                    paths.update(list(get_template_sources('')))
+                except (ImportError, AttributeError):
+                    # Yeah, this didn't work out so well, let's move on
+                    pass
+            if not paths:
+                raise OfflineGenerationError("No template paths found. None of "
+                                             "the configured template loaders "
+                                             "provided template paths. See "
+                                             "http://django.me/template-loaders "
+                                             "for more information on template "
+                                             "loaders.")
+            if verbosity > 1:
+                log.write("Considering paths:\n\t" + "\n\t".join(paths) + "\n")
+            templates = set()
+            for path in paths:
+                for root, dirs, files in os.walk(path,
+                        followlinks=options.get('followlinks', False)):
+                    templates.update(os.path.join(root, name)
+                        for name in files if not name.startswith('.') and
+                            any(fnmatch(name, "*%s" % glob) for glob in extensions))
+            if not templates:
+                raise OfflineGenerationError("No templates found. Make sure your "
+                                             "TEMPLATE_LOADERS and TEMPLATE_DIRS "
+                                             "settings are correct.")
         if verbosity > 1:
             log.write("Found templates:\n\t" + "\n\t".join(templates) + "\n")
 
@@ -237,6 +254,8 @@ class Command(NoArgsCommand):
                               "template %s\n" % template_name)
             nodes = list(self.walk_nodes(template))
             if nodes:
+                if build_manifest:
+                    manifest['templates'].add(template_name)
                 template.template_name = template_name
                 compressor_nodes.setdefault(template, []).extend(nodes)
 
@@ -245,6 +264,11 @@ class Command(NoArgsCommand):
                 "No 'compress' template tags found in templates."
                 "Try running compress command with --follow-links and/or"
                 "--extension=EXTENSIONS")
+        if build_manifest:
+            manifest['last_check'] = time.time()
+            manifest['templates'] = list(manifest['templates'])
+            with open(settings.TEMPLATE_MANIFEST, 'w') as fp:
+                fp.write(json.dumps(manifest))
 
         if verbosity > 0:
             log.write("Found 'compress' tags in:\n\t" +
